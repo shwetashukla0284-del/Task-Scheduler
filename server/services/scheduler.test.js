@@ -156,11 +156,7 @@ describe("getFreeBlocks", () => {
   test("returns no blocks for a past day", () => {
     jest.setSystemTime(at(10));
 
-    const blocks = getFreeBlocks(
-      at(0, 0, 29),
-      [],
-      workingHours
-    );
+    const blocks = getFreeBlocks(at(0, 0, 29), [], workingHours);
 
     expect(blocks).toHaveLength(0);
   });
@@ -186,6 +182,58 @@ describe("getFreeBlocks", () => {
     expect(blocks[0].start).toEqual(at(9, 0, 31));
     expect(blocks[0].end).toEqual(at(12, 0, 31));
   });
+
+  test("merges overlapping scheduled tasks when calculating free blocks", () => {
+    const tasks = [
+      scheduledTask({
+        _id: "task-a",
+        scheduledSlot: {
+          start: at(9),
+          end: at(10),
+        },
+      }),
+      scheduledTask({
+        _id: "task-b",
+        scheduledSlot: {
+          start: at(9, 30),
+          end: at(10, 30),
+        },
+      }),
+    ];
+
+    const blocks = getFreeBlocks(at(0), tasks, workingHours);
+
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]).toEqual({
+      start: at(10, 30),
+      end: at(12),
+    });
+  });
+
+  test("ignores invalid or reversed scheduled slots", () => {
+    const tasks = [
+      scheduledTask({
+        _id: "invalid-task",
+        scheduledSlot: {
+          start: "invalid-date",
+          end: at(10),
+        },
+      }),
+      scheduledTask({
+        _id: "reversed-task",
+        scheduledSlot: {
+          start: at(11),
+          end: at(10),
+        },
+      }),
+    ];
+
+    const blocks = getFreeBlocks(at(0), tasks, workingHours);
+
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0].start).toEqual(at(9));
+    expect(blocks[0].end).toEqual(at(12));
+  });
 });
 
 // ==========================================
@@ -199,7 +247,6 @@ describe("findEarliestSlot", () => {
       { start: at(10, 30), end: at(12) },
     ];
 
-    // The first block is too short for 90 minutes.
     const slot = findEarliestSlot(90, at(12), blocks);
 
     expect(slot).toEqual({
@@ -209,9 +256,7 @@ describe("findEarliestSlot", () => {
   });
 
   test("returns null when the task cannot fit before the deadline", () => {
-    const blocks = [
-      { start: at(9), end: at(10) },
-    ];
+    const blocks = [{ start: at(9), end: at(10) }];
 
     const slot = findEarliestSlot(120, at(12), blocks);
 
@@ -219,9 +264,31 @@ describe("findEarliestSlot", () => {
   });
 
   test("rejects zero duration", () => {
+    expect(() => findEarliestSlot(0, at(12), [])).toThrow(
+      "Duration must be greater than zero"
+    );
+  });
+
+  test("rejects negative duration", () => {
+    expect(() => findEarliestSlot(-30, at(12), [])).toThrow(
+      "Duration must be greater than zero"
+    );
+  });
+
+  test("rejects an invalid deadline", () => {
     expect(() =>
-      findEarliestSlot(0, at(12), [])
-    ).toThrow("Duration must be greater than zero");
+      findEarliestSlot(60, "invalid-date", [
+        { start: at(9), end: at(12) },
+      ])
+    ).toThrow("Invalid deadline");
+  });
+
+  test("does not schedule a task beyond its deadline", () => {
+    const slot = findEarliestSlot(60, at(9, 45), [
+      { start: at(9), end: at(12) },
+    ]);
+
+    expect(slot).toBeNull();
   });
 });
 
@@ -231,9 +298,7 @@ describe("findEarliestSlot", () => {
 
 describe("scheduleTask", () => {
   test("schedules a task in the earliest available slot", () => {
-    const task = makeTask({
-      estimatedDuration: 60,
-    });
+    const task = makeTask({ estimatedDuration: 60 });
 
     const result = scheduleTask({
       task,
@@ -265,6 +330,9 @@ describe("scheduleTask", () => {
     });
 
     expect(result.success).toBe(false);
+    expect(result.reason).toBe(
+      "No available slot before the deadline"
+    );
     expect(result.task.status).toBe("unscheduled");
 
     expect(result.task.scheduledSlot).toEqual({
@@ -289,8 +357,9 @@ describe("scheduleTask", () => {
     });
 
     expect(result.success).toBe(true);
-    expect(result.task.scheduledSlot.start.getTime())
-      .toBeGreaterThanOrEqual(Date.now());
+    expect(result.task.scheduledSlot.start.getTime()).toBeGreaterThanOrEqual(
+      Date.now()
+    );
   });
 
   test("does not schedule a task after working hours", () => {
@@ -311,6 +380,23 @@ describe("scheduleTask", () => {
     expect(result.success).toBe(false);
     expect(result.task.status).toBe("unscheduled");
   });
+
+  test("does not mutate the original task", () => {
+    const task = makeTask();
+
+    const originalStatus = task.status;
+    const originalSlot = { ...task.scheduledSlot };
+
+    scheduleTask({
+      task,
+      tasks: [],
+      day: at(0),
+      workingHours,
+    });
+
+    expect(task.status).toBe(originalStatus);
+    expect(task.scheduledSlot).toEqual(originalSlot);
+  });
 });
 
 // ==========================================
@@ -319,10 +405,7 @@ describe("scheduleTask", () => {
 
 describe("scheduleWithConflictResolution", () => {
   test("schedules normally without moving existing tasks", () => {
-    const task = makeTask({
-      estimatedDuration: 60,
-    });
-
+    const task = makeTask({ estimatedDuration: 60 });
     const existing = scheduledTask();
 
     const result = scheduleWithConflictResolution({
@@ -428,5 +511,104 @@ describe("scheduleWithConflictResolution", () => {
     });
 
     expect(existing.scheduledSlot).toEqual(originalSlot);
+  });
+
+  test("returns no valid conflict resolution when the displaced task cannot fit later", () => {
+    const existing = scheduledTask({
+      _id: "low-task",
+      estimatedDuration: 60,
+      priority: "low",
+      deadline: at(11, 30),
+    });
+
+    const urgent = makeTask({
+      _id: "urgent-task",
+      estimatedDuration: 120,
+      priority: "urgent",
+      deadline: at(11),
+    });
+
+    const result = scheduleWithConflictResolution({
+      task: urgent,
+      tasks: [existing],
+      day: at(0),
+      workingHours,
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.reason).toBe(
+      "No available slot or valid conflict resolution before the deadline"
+    );
+    expect(result.task.status).toBe("unscheduled");
+    expect(result.task.scheduledSlot).toEqual({
+      start: null,
+      end: null,
+    });
+    expect(result.changes).toHaveLength(0);
+  });
+
+  test("rejects an invalid priority when normal scheduling fails", () => {
+    const task = makeTask({
+      estimatedDuration: 240,
+      deadline: at(10),
+      priority: "invalid",
+    });
+
+    const result = scheduleWithConflictResolution({
+      task,
+      tasks: [],
+      day: at(0),
+      workingHours,
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.reason).toBe("Invalid task priority");
+    expect(result.task.status).toBe("unscheduled");
+  });
+
+  test("throws for an invalid deadline when conflict resolution is needed", () => {
+    const task = makeTask({
+      estimatedDuration: 240,
+      deadline: "invalid-date",
+      priority: "urgent",
+    });
+
+    expect(() =>
+      scheduleWithConflictResolution({
+        task,
+        tasks: [],
+        day: at(0),
+        workingHours,
+      })
+    ).toThrow("Invalid deadline");
+  });
+
+  test("preserves existing tasks when conflict resolution fails", () => {
+    const existing = scheduledTask({
+      _id: "low-task",
+      priority: "low",
+      deadline: at(11, 30),
+    });
+
+    const originalSlot = {
+      start: new Date(existing.scheduledSlot.start),
+      end: new Date(existing.scheduledSlot.end),
+    };
+
+    const urgent = makeTask({
+      estimatedDuration: 120,
+      priority: "urgent",
+      deadline: at(11),
+    });
+
+    scheduleWithConflictResolution({
+      task: urgent,
+      tasks: [existing],
+      day: at(0),
+      workingHours,
+    });
+
+    expect(existing.scheduledSlot).toEqual(originalSlot);
+    expect(existing.status).toBe("scheduled");
   });
 });

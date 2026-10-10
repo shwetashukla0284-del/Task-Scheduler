@@ -11,10 +11,14 @@ const generateToken = (userId) => {
   );
 };
 
+const isValidEmail = (email) => {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+};
+
 // Register
 const register = async (req, res) => {
   try {
-    const { name, email, password } = req.body;
+    const { name, email, password } = req.body || {};
 
     if (
       typeof name !== "string" ||
@@ -29,13 +33,29 @@ const register = async (req, res) => {
       });
     }
 
-    if (password.length < 6) {
+    const normalizedName = name.trim();
+    const normalizedEmail = email.trim().toLowerCase();
+
+    if (normalizedName.length > 100) {
       return res.status(400).json({
-        message: "Password must be at least 6 characters",
+        message: "Name must not exceed 100 characters",
       });
     }
 
-    const normalizedEmail = email.trim().toLowerCase();
+    if (
+      normalizedEmail.length > 254 ||
+      !isValidEmail(normalizedEmail)
+    ) {
+      return res.status(400).json({
+        message: "Please provide a valid email address",
+      });
+    }
+
+    if (password.length < 6 || password.length > 72) {
+      return res.status(400).json({
+        message: "Password must be between 6 and 72 characters",
+      });
+    }
 
     const existingUser = await User.findOne({
       email: normalizedEmail,
@@ -50,7 +70,7 @@ const register = async (req, res) => {
     const hashedPassword = await bcrypt.hash(password, 12);
 
     const user = await User.create({
-      name: name.trim(),
+      name: normalizedName,
       email: normalizedEmail,
       password: hashedPassword,
     });
@@ -74,6 +94,7 @@ const register = async (req, res) => {
     }
 
     console.error("Registration error:", error.message);
+
     return res.status(500).json({
       message: "Registration failed",
     });
@@ -83,7 +104,7 @@ const register = async (req, res) => {
 // Login
 const login = async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const { email, password } = req.body || {};
 
     if (
       typeof email !== "string" ||
@@ -96,8 +117,20 @@ const login = async (req, res) => {
       });
     }
 
+    const normalizedEmail = email.trim().toLowerCase();
+
+    if (
+      normalizedEmail.length > 254 ||
+      !isValidEmail(normalizedEmail) ||
+      password.length > 72
+    ) {
+      return res.status(400).json({
+        message: "Invalid email or password format",
+      });
+    }
+
     const user = await User.findOne({
-      email: email.trim().toLowerCase(),
+      email: normalizedEmail,
     }).select("+password");
 
     if (!user) {
@@ -130,6 +163,7 @@ const login = async (req, res) => {
     });
   } catch (error) {
     console.error("Login error:", error.message);
+
     return res.status(500).json({
       message: "Login failed",
     });

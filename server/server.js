@@ -1,6 +1,10 @@
+
 const express = require("express");
 const mongoose = require("mongoose");
 const cors = require("cors");
+const helmet = require("helmet");
+const { rateLimit } = require("express-rate-limit");
+
 require("dotenv").config();
 
 // Import routes
@@ -13,14 +17,40 @@ const app = express();
 // Disable ETag-based caching
 app.set("etag", false);
 
+// Security headers
+app.use(helmet());
+
 // Middleware
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "10kb" }));
 
 // Disable caching for API responses
 app.use((req, res, next) => {
   res.set("Cache-Control", "no-store");
   next();
+});
+
+// General API rate limit
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 200,
+  standardHeaders: "draft-8",
+  legacyHeaders: false,
+  message: {
+    message: "Too many requests. Please try again later.",
+  },
+});
+
+// Stricter limit for authentication requests
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 10,
+  standardHeaders: "draft-8",
+  legacyHeaders: false,
+  message: {
+    message:
+      "Too many authentication attempts. Please try again later.",
+  },
 });
 
 // Health check
@@ -31,9 +61,9 @@ app.get("/", (req, res) => {
 });
 
 // API routes
-app.use("/api/auth", authRoutes);
-app.use("/api/protected", protectedRoutes);
-app.use("/api/tasks", taskRoutes);
+app.use("/api/auth", authLimiter, authRoutes);
+app.use("/api/protected", apiLimiter, protectedRoutes);
+app.use("/api/tasks", apiLimiter, taskRoutes);
 
 // Handle undefined routes
 app.use((req, res) => {
@@ -44,6 +74,10 @@ app.use((req, res) => {
 
 // Global error handler
 app.use((err, req, res, next) => {
+  if (res.headersSent) {
+    return next(err);
+  }
+
   console.error("Server error:", err);
 
   res.status(err.status || 500).json({

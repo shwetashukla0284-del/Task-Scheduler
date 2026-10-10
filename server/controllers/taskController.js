@@ -1,9 +1,17 @@
 
+const mongoose = require("mongoose");
 const Task = require("../models/task");
+
 const {
   scheduleWithConflictResolution,
   getFreeBlocks,
 } = require("../services/scheduler");
+
+const MAX_TITLE_LENGTH = 150;
+const MAX_DURATION_MINUTES = 24 * 60 * 30;
+
+const PRIORITIES = ["low", "medium", "high", "urgent"];
+const STATUSES = ["pending", "scheduled", "completed", "unscheduled"];
 
 // Get authenticated user's ID
 const getUserId = (req) => {
@@ -12,6 +20,79 @@ const getUserId = (req) => {
   }
 
   return req.user._id || req.user.id;
+};
+
+// Validate MongoDB task ID
+const isValidTaskId = (id) => mongoose.isValidObjectId(id);
+
+// Validate task title
+const validateTitle = (title) =>
+  typeof title === "string" &&
+  title.trim().length >= 1 &&
+  title.trim().length <= MAX_TITLE_LENGTH;
+
+// Validate task duration
+const validateDuration = (duration) => {
+  if (
+    duration === "" ||
+    duration === null ||
+    duration === undefined
+  ) {
+    return false;
+  }
+
+  const value = Number(duration);
+
+  return (
+    Number.isFinite(value) &&
+    Number.isInteger(value) &&
+    value >= 1 &&
+    value <= MAX_DURATION_MINUTES
+  );
+};
+
+// Validate deadline format
+const validateDeadline = (deadline) => {
+  if (
+    deadline === null ||
+    deadline === undefined ||
+    deadline === ""
+  ) {
+    return false;
+  }
+
+  return !Number.isNaN(new Date(deadline).getTime());
+};
+
+// Validate working hours
+const validateWorkingHours = (workingHours) => {
+  if (
+    !workingHours ||
+    typeof workingHours !== "object" ||
+    typeof workingHours.start !== "string" ||
+    typeof workingHours.end !== "string"
+  ) {
+    return false;
+  }
+
+  const timePattern = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+  if (
+    !timePattern.test(workingHours.start) ||
+    !timePattern.test(workingHours.end)
+  ) {
+    return false;
+  }
+
+  const toMinutes = (time) => {
+    const [hours, minutes] = time.split(":").map(Number);
+    return hours * 60 + minutes;
+  };
+
+  return (
+    toMinutes(workingHours.start) <
+    toMinutes(workingHours.end)
+  );
 };
 
 // Create a task
@@ -25,38 +106,43 @@ const createTask = async (req, res) => {
     } = req.body || {};
 
     if (
-      typeof title !== "string" ||
-      !title.trim() ||
+      title === undefined ||
       estimatedDuration === undefined ||
+      deadline === undefined ||
+      title === null ||
       estimatedDuration === null ||
+      deadline === null ||
+      title === "" ||
       estimatedDuration === "" ||
-      !deadline
+      deadline === ""
     ) {
       return res.status(400).json({
         message: "Title, duration and deadline are required",
       });
     }
 
-    if (
-      !Number.isFinite(Number(estimatedDuration)) ||
-      Number(estimatedDuration) < 1
-    ) {
+    if (!validateTitle(title)) {
       return res.status(400).json({
-        message: "Duration must be at least 1 minute",
+        message: "Title must contain 1–150 characters",
       });
     }
 
-    if (!["low", "medium", "high", "urgent"].includes(priority)) {
+    if (!validateDuration(estimatedDuration)) {
       return res.status(400).json({
-        message: "Invalid priority",
+        message:
+          "Duration must be a whole number between 1 and 43200 minutes",
       });
     }
 
-    const parsedDeadline = new Date(deadline);
-
-    if (Number.isNaN(parsedDeadline.getTime())) {
+    if (!validateDeadline(deadline)) {
       return res.status(400).json({
         message: "Invalid deadline",
+      });
+    }
+
+    if (!PRIORITIES.includes(priority)) {
+      return res.status(400).json({
+        message: "Invalid priority",
       });
     }
 
@@ -64,7 +150,7 @@ const createTask = async (req, res) => {
       user: getUserId(req),
       title: title.trim(),
       estimatedDuration: Number(estimatedDuration),
-      deadline: parsedDeadline,
+      deadline: new Date(deadline),
       priority,
     });
 
@@ -74,6 +160,7 @@ const createTask = async (req, res) => {
     });
   } catch (error) {
     console.error("Create task error:", error);
+
     return res.status(500).json({
       message: "Failed to create task",
       error: error.message,
@@ -94,6 +181,7 @@ const getTasks = async (req, res) => {
     });
   } catch (error) {
     console.error("Get tasks error:", error);
+
     return res.status(500).json({
       message: "Failed to fetch tasks",
       error: error.message,
@@ -104,6 +192,12 @@ const getTasks = async (req, res) => {
 // Update a task
 const updateTask = async (req, res) => {
   try {
+    if (!isValidTaskId(req.params.id)) {
+      return res.status(400).json({
+        message: "Invalid task ID",
+      });
+    }
+
     const userId = getUserId(req);
     const body = req.body || {};
 
@@ -129,49 +223,42 @@ const updateTask = async (req, res) => {
       });
     }
 
-    if (
-      updates.title !== undefined &&
-      (typeof updates.title !== "string" ||
-        !updates.title.trim())
-    ) {
-      return res.status(400).json({
-        message: "Title cannot be empty",
-      });
-    }
-
     if (updates.title !== undefined) {
+      if (!validateTitle(updates.title)) {
+        return res.status(400).json({
+          message: "Title must contain 1–150 characters",
+        });
+      }
+
       updates.title = updates.title.trim();
     }
 
     if (updates.estimatedDuration !== undefined) {
-      const duration = Number(updates.estimatedDuration);
-
-      if (!Number.isFinite(duration) || duration < 1) {
+      if (!validateDuration(updates.estimatedDuration)) {
         return res.status(400).json({
-          message: "Duration must be at least 1 minute",
+          message:
+            "Duration must be a whole number between 1 and 43200 minutes",
         });
       }
 
-      updates.estimatedDuration = duration;
+      updates.estimatedDuration = Number(
+        updates.estimatedDuration
+      );
     }
 
     if (updates.deadline !== undefined) {
-      const deadline = new Date(updates.deadline);
-
-      if (Number.isNaN(deadline.getTime())) {
+      if (!validateDeadline(updates.deadline)) {
         return res.status(400).json({
           message: "Invalid deadline",
         });
       }
 
-      updates.deadline = deadline;
+      updates.deadline = new Date(updates.deadline);
     }
 
     if (
       updates.priority !== undefined &&
-      !["low", "medium", "high", "urgent"].includes(
-        updates.priority
-      )
+      !PRIORITIES.includes(updates.priority)
     ) {
       return res.status(400).json({
         message: "Invalid priority",
@@ -180,9 +267,7 @@ const updateTask = async (req, res) => {
 
     if (
       updates.status !== undefined &&
-      !["pending", "scheduled", "completed", "unscheduled"].includes(
-        updates.status
-      )
+      !STATUSES.includes(updates.status)
     ) {
       return res.status(400).json({
         message: "Invalid task status",
@@ -218,7 +303,7 @@ const updateTask = async (req, res) => {
     const schedulingDetailsChanged =
       durationChanged || deadlineChanged || priorityChanged;
 
-    // Clear the old slot only when a scheduled task's
+    // Clear the previous slot if a scheduled task's
     // scheduling details change, or it is set to pending.
     const clearOldSchedule =
       existingTask.status === "scheduled" &&
@@ -277,6 +362,12 @@ const updateTask = async (req, res) => {
 // Delete a task
 const deleteTask = async (req, res) => {
   try {
+    if (!isValidTaskId(req.params.id)) {
+      return res.status(400).json({
+        message: "Invalid task ID",
+      });
+    }
+
     const task = await Task.findOneAndDelete({
       _id: req.params.id,
       user: getUserId(req),
@@ -310,6 +401,12 @@ const deleteTask = async (req, res) => {
 // Automatically schedule a task before its deadline
 const scheduleTask = async (req, res) => {
   try {
+    if (!isValidTaskId(req.params.id)) {
+      return res.status(400).json({
+        message: "Invalid task ID",
+      });
+    }
+
     const userId = getUserId(req);
 
     const task = await Task.findOne({
@@ -340,12 +437,11 @@ const scheduleTask = async (req, res) => {
 
     if (
       workingHours !== undefined &&
-      (!workingHours ||
-        typeof workingHours.start !== "string" ||
-        typeof workingHours.end !== "string")
+      !validateWorkingHours(workingHours)
     ) {
       return res.status(400).json({
-        message: "Invalid working hours",
+        message:
+          "Invalid working hours. Use HH:MM format with start earlier than end.",
       });
     }
 
